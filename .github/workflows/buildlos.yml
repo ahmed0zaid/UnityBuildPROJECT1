@@ -1,0 +1,98 @@
+name: General iOS Cloud Builder (Split ZIPs)
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_name:
+        description: 'ZIP filename without the .001 suffix (example: AR_Card_BuildM.zip)'
+        required: true
+        default: 'AR_Card_BuildM.zip'
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Combine and unzip project files
+        env:
+          BASE_NAME: ${{ inputs.base_name }}
+        run: |
+          set -euo pipefail
+
+          # Only accept a filename, not a path or shell glob.
+          if [[ ! "$BASE_NAME" =~ ^[A-Za-z0-9._-]+\.zip$ ]]; then
+            echo "Invalid base_name: $BASE_NAME"
+            exit 1
+          fi
+
+          shopt -s nullglob
+          parts=("${BASE_NAME}".[0-9][0-9][0-9])
+          if (( ${#parts[@]} == 0 )); then
+            echo "No ZIP parts found for ${BASE_NAME}.001"
+            exit 1
+          fi
+
+          printf 'Combining %s parts:\n' "${#parts[@]}"
+          printf '%s\n' "${parts[@]}"
+          cat "${parts[@]}" > combined_project.zip
+          unzip -tq combined_project.zip
+
+          mkdir -p extracted_project
+          unzip -q combined_project.zip -d extracted_project
+          echo "ZIP extracted successfully."
+
+      - name: Fix script permissions
+        run: |
+          find extracted_project -type f -name '*.sh' -exec chmod +x {} +
+
+      - name: Set up Xcode 15.4
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
+
+      - name: Build Xcode project
+        run: |
+          set -euo pipefail
+          PROJECT_PATH=$(find "$GITHUB_WORKSPACE/extracted_project" -type d -name 'Unity-iPhone.xcodeproj' -print -quit)
+          if [[ -z "$PROJECT_PATH" ]]; then
+            echo 'Unity-iPhone.xcodeproj not found in extracted files.'
+            exit 1
+          fi
+          echo "Found Xcode project: $PROJECT_PATH"
+          cd "$(dirname "$PROJECT_PATH")"
+
+          xcodebuild \
+            -project "$PROJECT_PATH" \
+            -scheme Unity-iPhone \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$GITHUB_WORKSPACE/DerivedData" \
+            CONFIGURATION_BUILD_DIR="$GITHUB_WORKSPACE/build_output" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            clean build
+
+      - name: Package into IPA
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find "$GITHUB_WORKSPACE/build_output" -type d -name '*.app' -print -quit)
+          if [[ -z "$APP_PATH" ]]; then
+            echo 'No .app bundle found in build_output.'
+            exit 1
+          fi
+          echo "Found app: $APP_PATH"
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry -0 CompiledApp.ipa Payload
+          echo 'Unsigned IPA packaged successfully.'
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-ios-ipa
+          path: CompiledApp.ipa
+          if-no-files-found: error
